@@ -4,98 +4,197 @@ import com.simplecpp.compiler.ast.AstNodes.*;
 import com.simplecpp.compiler.ast.AstProgram;
 import com.simplecpp.compiler.util.Diagnostics;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.Map;
 
 public class SemanticAnalyzer {
 
-    public enum Type { INT, STRING_LIT }
+    private static class Symbol {
+        final ValueType type;
+        boolean initialized;
+        Symbol(ValueType type, boolean initialized) { this.type = type; this.initialized = initialized; }
+    }
 
     private final Diagnostics diags;
-    private final Map<String, Type> symbols = new HashMap<>();
-    private final Map<String, Boolean> initialized = new HashMap<>();
+    private final Deque<Map<String, Symbol>> scopes = new ArrayDeque<>();
 
     public SemanticAnalyzer(Diagnostics diags) { this.diags = diags; }
 
     public void analyze(AstProgram program) {
-        for (Stmt s : program.root.statements) {
-            if (s instanceof Decl d) analyzeDecl(d);
-            else if (s instanceof Assign a) analyzeAssign(a);
-            else if (s instanceof Cin c) analyzeCin(c);
-            else if (s instanceof Cout c) analyzeCout(c);
+        pushScope();
+        for (Stmt s : program.root.statements) analyzeStmt(s);
+        popScope();
+    }
+
+    private void pushScope() { scopes.push(new HashMap<>()); }
+    private void popScope() { scopes.pop(); }
+
+    private Map<String, Symbol> currentScope() { return scopes.peek(); }
+
+    private Symbol lookup(String name) {
+        for (Map<String, Symbol> scope : scopes) {
+            Symbol sym = scope.get(name);
+            if (sym != null) return sym;
+        }
+        return null;
+    }
+
+    private void analyzeStmt(Stmt s) {
+        if (s instanceof Block b) {
+            pushScope();
+            for (Stmt inner : b.statements) analyzeStmt(inner);
+            popScope();
+        } else if (s instanceof Decl d) {
+            analyzeDecl(d);
+        } else if (s instanceof Assign a) {
+            analyzeAssign(a);
+        } else if (s instanceof Cin c) {
+            analyzeCin(c);
+        } else if (s instanceof Cout c) {
+            analyzeCout(c);
+        } else if (s instanceof If i) {
+            analyzeIf(i);
+        } else if (s instanceof While w) {
+            analyzeWhile(w);
         }
     }
 
     private void analyzeDecl(Decl d) {
-        if (symbols.containsKey(d.name)) {
+        if (currentScope().containsKey(d.name)) {
             diags.error(d.pos().line, d.pos().col, "Duplicate declaration of '" + d.name + "'.");
             return;
         }
-        symbols.put(d.name, Type.INT);
-        boolean init = false;
+        Symbol sym = new Symbol(d.type, false);
+        currentScope().put(d.name, sym);
         if (d.initOrNull != null) {
-            Type t = typeOf(d.initOrNull);
-            if (t != Type.INT) diags.error(d.pos().line, d.pos().col, "Initializer for '" + d.name + "' must be int.");
-            init = (t == Type.INT);
+            ValueType initType = typeOf(d.initOrNull);
+            if (initType != d.type) {
+                diags.error(d.pos().line, d.pos().col, "Initializer type mismatch for '" + d.name + "'.");
+            } else {
+                sym.initialized = true;
+            }
         }
-        initialized.put(d.name, init);
     }
 
     private void analyzeAssign(Assign a) {
-        if (!symbols.containsKey(a.name)) {
-            // allow implicit declaration-by-assignment for this toy language
-            symbols.put(a.name, Type.INT);
-            initialized.put(a.name, false);
+        ValueType valueType = typeOf(a.value);
+        Symbol sym = lookup(a.name);
+        if (sym == null) {
+            if (valueType == ValueType.STRING) {
+                diags.error(a.pos().line, a.pos().col,
+                        "Implicitly declared variables cannot store string values.");
+                return;
+            }
+            sym = new Symbol(valueType, false);
+            currentScope().put(a.name, sym);
+        } else if (valueType != sym.type) {
+            diags.error(a.pos().line, a.pos().col,
+                    "Cannot assign " + valueType + " to variable of type " + sym.type + ".");
+            return;
         }
-        Type t = typeOf(a.value);
-        if (t != Type.INT) diags.error(a.pos().line, a.pos().col, "Assignment to '" + a.name + "' must be int.");
-        initialized.put(a.name, t == Type.INT);
+        sym.initialized = (valueType != ValueType.STRING);
     }
 
     private void analyzeCin(Cin c) {
         for (String name : c.names) {
-            symbols.putIfAbsent(name, Type.INT);
-            initialized.put(name, true); // reading from cin initializes
+            Symbol sym = lookup(name);
+            if (sym == null) {
+                sym = new Symbol(ValueType.INT, true);
+                currentScope().put(name, sym);
+            } else if (sym.type != ValueType.INT && sym.type != ValueType.BOOL) {
+                diags.error(c.pos().line, c.pos().col, "cin does not support type '" + sym.type + "'.");
+            } else {
+                sym.initialized = true;
+            }
         }
     }
 
     private void analyzeCout(Cout c) {
         for (Expr e : c.items) {
-            Type t = typeOf(e);
-            if (t != Type.INT && t != Type.STRING_LIT) {
-                diags.error(c.pos().line, c.pos().col, "cout supports only int expressions and string literals.");
+            ValueType t = typeOf(e);
+            if (t != ValueType.INT && t != ValueType.BOOL && t != ValueType.STRING) {
+                diags.error(e.pos().line, e.pos().col, "cout cannot print value of type " + t + ".");
             }
         }
     }
 
-    private Type typeOf(Expr e) {
-        if (e instanceof IntLit) return Type.INT;
-        if (e instanceof StringLit) return Type.STRING_LIT;
+    private void analyzeIf(If i) {
+        ValueType cond = typeOf(i.condition);
+        if (cond != ValueType.BOOL) {
+            diags.error(i.condition.pos().line, i.condition.pos().col, "if condition must be bool.");
+        }
+        pushScope();
+        analyzeStmt(i.thenBranch);
+        popScope();
+        if (i.elseBranch != null) {
+            pushScope();
+            analyzeStmt(i.elseBranch);
+            popScope();
+        }
+    }
+
+    private void analyzeWhile(While w) {
+        ValueType cond = typeOf(w.condition);
+        if (cond != ValueType.BOOL) {
+            diags.error(w.condition.pos().line, w.condition.pos().col, "while condition must be bool.");
+        }
+        pushScope();
+        analyzeStmt(w.body);
+        popScope();
+    }
+
+    private ValueType typeOf(Expr e) {
+        if (e instanceof IntLit) return ValueType.INT;
+        if (e instanceof BoolLit) return ValueType.BOOL;
+        if (e instanceof StringLit) return ValueType.STRING;
         if (e instanceof Id id) {
-            if (!symbols.containsKey(id.name)) {
+            Symbol sym = lookup(id.name);
+            if (sym == null) {
                 diags.error(id.pos().line, id.pos().col, "Use of undeclared identifier '" + id.name + "'.");
-                return Type.INT; // continue as int to avoid error flood
+                return ValueType.INT;
             }
-            if (!initialized.getOrDefault(id.name, false)) {
+            if (!sym.initialized) {
                 diags.error(id.pos().line, id.pos().col, "Variable '" + id.name + "' may be uninitialized here.");
             }
-            return symbols.get(id.name);
+            return sym.type;
         }
-        if (e instanceof Add a) {
-            Type l = typeOf(a.left), r = typeOf(a.right);
-            if (l != Type.INT || r != Type.INT) {
-                diags.error(a.pos().line, a.pos().col, "Operator '+' is only defined for int + int.");
+        if (e instanceof Unary u) {
+            ValueType inner = typeOf(u.inner);
+            if (u.op == Unary.Op.NEG) {
+                if (inner != ValueType.INT) diags.error(u.pos().line, u.pos().col, "Unary '-' requires int.");
+                return ValueType.INT;
+            } else {
+                if (inner != ValueType.BOOL) diags.error(u.pos().line, u.pos().col, "Logical '!' requires bool.");
+                return ValueType.BOOL;
             }
-            return Type.INT;
         }
-        if (e instanceof Neg n) {
-            Type t = typeOf(n.inner);
-            if (t != Type.INT) {
-                diags.error(n.pos().line, n.pos().col, "Unary '-' requires an int.");
-            }
-            return Type.INT;
+        if (e instanceof Binary b) {
+            ValueType left = typeOf(b.left);
+            ValueType right = typeOf(b.right);
+            return switch (b.op) {
+                case ADD, SUB, MUL, DIV, MOD -> {
+                    if (left != ValueType.INT || right != ValueType.INT)
+                        diags.error(b.pos().line, b.pos().col, "Arithmetic operators require ints.");
+                    yield ValueType.INT;
+                }
+                case LT, LTE, GT, GTE -> {
+                    if (left != ValueType.INT || right != ValueType.INT)
+                        diags.error(b.pos().line, b.pos().col, "Comparison operators require ints.");
+                    yield ValueType.BOOL;
+                }
+                case EQ, NEQ -> {
+                    if (left != right) diags.error(b.pos().line, b.pos().col, "Operands must have matching types.");
+                    yield ValueType.BOOL;
+                }
+                case AND, OR -> {
+                    if (left != ValueType.BOOL || right != ValueType.BOOL)
+                        diags.error(b.pos().line, b.pos().col, "Logical operators require bool operands.");
+                    yield ValueType.BOOL;
+                }
+            };
         }
-        return Type.INT;
+        return ValueType.INT;
     }
 }
-

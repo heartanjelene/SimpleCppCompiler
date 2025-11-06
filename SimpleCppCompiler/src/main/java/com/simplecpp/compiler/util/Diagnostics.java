@@ -19,6 +19,8 @@ public class Diagnostics {
     public void error(int line, int col, String msg) { errors.add(new Message(line, col, msg)); }
     public boolean hasErrors() { return !errors.isEmpty(); }
 
+    public List<Message> errors() { return List.copyOf(errors); }
+
     public void printErrors() { for (Message m : errors) System.err.println(m); }
 
     public void throwIfErrors() {

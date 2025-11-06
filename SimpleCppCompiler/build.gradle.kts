@@ -13,6 +13,7 @@ repositories {
 dependencies {
     antlr("org.antlr:antlr4:4.13.1")
     implementation("org.antlr:antlr4-runtime:4.13.1")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
 }
 
 application {
@@ -38,6 +39,10 @@ tasks.generateGrammarSource {
 
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 tasks.register<Jar>("fatJar") {
@@ -69,3 +74,9 @@ tasks.register<JavaExec>("compileExample") {
     args(src, "-o", out)
 }
 
+tasks.register<JavaExec>("runGui") {
+    group = "application"
+    description = "Launch the Swing GUI for the Mini C++ compiler"
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("com.simplecpp.compiler.gui.CompilerGuiMain")
+}
